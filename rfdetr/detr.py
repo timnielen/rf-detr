@@ -121,6 +121,12 @@ class RFDETR:
         """
         self.model.export(**kwargs)
 
+    def export_coreml(self, **kwargs):
+        """
+        Export your model to a CoreML file. (Custom)
+        """
+        return self.model.export_coreml(stds=self.stds, means=self.means, **kwargs)
+
     def train_from_config(self, config: TrainConfig, **kwargs):
         with open(
             os.path.join(config.dataset_dir, "train", "_annotations.coco.json"), "r"

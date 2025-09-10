@@ -563,7 +563,63 @@ class Model:
         
         print("ONNX export completed successfully")
         self.model = self.model.to(device)
-            
+
+
+    def export_coreml(self, stds, means, output_dir="output", infer_dir=None, backbone_only=False, shape=None, batch_size=1, **kwargs):
+        """Export the trained model to CoreML format"""
+        print(f"Exporting model to CoreML format")
+        try:
+            from rfdetr.deploy.export import export_coreml, make_infer_image
+        except ImportError:
+            print("It seems some dependencies for CoreML export are missing.")
+            raise
+
+        device = self.device
+        model = deepcopy(self.model.to("cpu"))
+        model.to(device)
+
+        os.makedirs(output_dir, exist_ok=True)
+        output_dir = Path(output_dir)
+        if shape is None:
+            shape = (self.resolution, self.resolution)
+        else:
+            if shape[0] % 14 != 0 or shape[1] % 14 != 0:
+                raise ValueError("Shape must be divisible by 14")
+
+        input_tensors = make_infer_image(infer_dir, shape, batch_size, device).to(device)
+        input_names = ['input']
+        output_names = ['features'] if backbone_only else ['dets', 'labels']
+        dynamic_axes = None
+        self.model.eval()
+        with torch.no_grad():
+            if backbone_only:
+                features = model(input_tensors)
+                print(f"PyTorch inference output shape: {features.shape}")
+            else:
+                outputs = model(input_tensors)
+                dets = outputs['pred_boxes']
+                labels = outputs['pred_logits']
+                print(f"PyTorch inference output shapes - Boxes: {dets.shape}, Labels: {labels.shape}")
+        model.cpu()
+        input_tensors = input_tensors.cpu()
+
+        # Export to CoreML
+        coreml_model = export_coreml(
+            output_dir=output_dir,
+            model=model,
+            input_names=input_names,
+            input_tensors=input_tensors,
+            output_names=output_names,
+            stds=stds,
+            means=means,
+            backbone_only=backbone_only,
+            **kwargs
+        )
+
+        print("CoreML export completed successfully")
+        self.model = self.model.to(device)
+
+        return coreml_model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('LWDETR training and evaluation script', parents=[get_args_parser()])

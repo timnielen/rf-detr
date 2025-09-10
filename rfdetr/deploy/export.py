@@ -20,18 +20,21 @@ from pathlib import Path
 import time
 from collections import defaultdict
 
-import onnx
+# import onnx
 import torch
-import onnxsim
+# import onnxsim
 import numpy as np
 from PIL import Image
 
 import rfdetr.util.misc as utils
 import rfdetr.datasets.transforms as T
 from rfdetr.models import build_model
-from rfdetr.deploy._onnx import OnnxOptimizer
+# from rfdetr.deploy._onnx import OnnxOptimizer
 import re
 import sys
+
+import coremltools as ct
+import torchvision.transforms.functional as F
 
 
 def run_command_shell(command, dry_run:bool = False) -> int:
@@ -90,6 +93,51 @@ def export_onnx(output_dir, model, input_names, input_tensors, output_names, dyn
 
     print(f'\nSuccessfully exported ONNX model: {output_file}')
     return output_file
+
+class NormalizedWrapper(nn.Module):
+    def __init__(self, model, means, stds):
+        super().__init__()
+        self.model = model
+        # Normalization stats
+        self.means = means
+        self.stds = stds
+
+    def forward(self, x):
+        x = F.normalize(x, self.means, self.stds)
+        return self.model(x)
+
+def export_coreml(output_dir, model, input_names, input_tensors, output_names, stds, means, precision=ct.precision.FLOAT32, backbone_only=False):
+    export_name = "backbone_model" if backbone_only else "inference_model"
+    output_file = os.path.join(output_dir, f"{export_name}.mlpackage")
+
+    # Prepare model for export
+    if hasattr(model, "export"):
+        model.export()
+    
+    wrapped = NormalizedWrapper(model, means, stds)
+    wrapped.eval()
+    traced = torch.jit.trace(wrapped, input_tensors)
+
+    # 3. Convert to Core ML
+    coreml_model = ct.convert(
+        traced,
+        inputs=[ct.ImageType(
+            name=input_names[0], 
+            shape=input_tensors.shape,
+            scale=1/255.0,
+            color_layout="RGB",
+        )],
+        outputs=[ct.TensorType(name=output_names[0])] if backbone_only else [ct.TensorType(name=output_names[0]), ct.TensorType(name=output_names[1])],
+        convert_to="mlprogram",
+        compute_precision=precision,
+
+    )
+
+    # 4. Save the .mlmodel package
+    coreml_model.save(output_file)
+
+    print(f'\nSuccessfully exported CoreML model: {output_file}')
+    return coreml_model
 
 
 def onnx_simplify(onnx_dir:str, input_names, input_tensors, force=False):
