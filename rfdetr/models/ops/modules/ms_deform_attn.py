@@ -117,17 +117,20 @@ class MSDeformAttn(nn.Module):
         if input_padding_mask is not None:
             value = value.masked_fill(input_padding_mask[..., None], float(0))
 
-        sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)
-        attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
-
-        # N, Len_q, n_heads, n_levels, n_points, 2
+        sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, -1)
+        attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, -1)
+        sampling_offsets = sampling_offsets.transpose(1,2)
+        attention_weights = attention_weights.transpose(1,2)
+        sampling_offsets = sampling_offsets.view(N * self.n_heads, Len_q, self.n_levels, self.n_points, 2)
+        attention_weights = attention_weights.view(N * self.n_heads, Len_q, self.n_levels * self.n_points)
+        # N * n_heads, Len_q, n_levels, n_points, 2
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
-            sampling_locations = reference_points[:, :, None, :, None, :] \
-                                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+            sampling_locations = reference_points[:, :, :, None, :] \
+                                 + sampling_offsets / offset_normalizer[None, None, :, None, :]
         elif reference_points.shape[-1] == 4:
-            sampling_locations = reference_points[:, :, None, :, None, :2] \
-                                 + sampling_offsets / self.n_points * reference_points[:, :, None, :, None, 2:] * 0.5
+            sampling_locations = reference_points[:, :, :, None, :2] \
+                                 + sampling_offsets / self.n_points * reference_points[:, :, :, None, 2:] * 0.5
         else:
             raise ValueError(
                 'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
