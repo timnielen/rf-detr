@@ -121,9 +121,10 @@ class MSDeformAttn(nn.Module):
         attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, -1)
         sampling_offsets = sampling_offsets.transpose(1,2)
         attention_weights = attention_weights.transpose(1,2)
-        sampling_offsets = sampling_offsets.view(N * self.n_heads, Len_q, self.n_levels, self.n_points, 2)
-        attention_weights = attention_weights.view(N * self.n_heads, Len_q, self.n_levels * self.n_points)
+        sampling_offsets = sampling_offsets.reshape(N * self.n_heads, Len_q, self.n_levels, self.n_points, 2)
+        attention_weights = attention_weights.reshape(N * self.n_heads, Len_q, self.n_levels * self.n_points)
         # N * n_heads, Len_q, n_levels, n_points, 2
+        reference_points = reference_points.repeat(self.n_heads, 1, 1, 1)
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
             sampling_locations = reference_points[:, :, :, None, :] \
