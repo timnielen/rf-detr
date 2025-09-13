@@ -93,6 +93,33 @@ def hflip(image, target):
 
     return flipped_image, target
 
+def drawBox(image, target):
+    draw = PIL.ImageDraw.Draw(image)
+    for box in target["boxes"]:
+        x1, y1, x2, y2 = box
+        draw.rectangle([x1, y1, x2, y2], outline="yellow", width=2)
+    image.show()
+
+def rotate(image, target, angle):
+    rotated_image = F.rotate(image, angle)
+    angle_rad = torch.deg2rad(torch.tensor(angle))
+
+    w, h = image.size
+    center = torch.tensor([w / 2, h / 2])
+    R = torch.tensor([[torch.cos(-angle_rad), -torch.sin(-angle_rad)],
+                      [torch.sin(-angle_rad),  torch.cos(-angle_rad)]])
+
+    if "boxes" in target:
+        boxes = target["boxes"].view(-1, 2, 2)
+        boxes = boxes.repeat(1, 2, 1)
+        boxes[:, 2:, 1] = boxes[:, 2:, 1].flip(dims=(1,))
+        rotated_boxes = torch.matmul(boxes - center, R.T) + center
+        min_xy, _ = torch.min(rotated_boxes, dim=1)
+        max_xy, _ = torch.max(rotated_boxes, dim=1)
+        updated = torch.cat((min_xy, max_xy), dim=1)
+        target["boxes"] = updated
+    
+    return rotated_image, target
 
 def resize(image, target, size, max_size=None):
     # size can be min_size (scalar) or (w, h) tuple
@@ -212,6 +239,13 @@ class RandomHorizontalFlip(object):
             return hflip(img, target)
         return img, target
 
+class RandomRotate(object):
+    def __init__(self, range=(-15, 15)):
+        self.range = range
+
+    def __call__(self, img, target):
+        angle = random.uniform(self.range[0], self.range[1])
+        return rotate(img, target, angle)
 
 class RandomResize(object):
     def __init__(self, sizes, max_size=None):
