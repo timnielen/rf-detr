@@ -274,8 +274,6 @@ class Transformer(nn.Module):
                 
                 refpoint_embed = torch.concat(
                     [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
-                
-                # memory = memory_ts
 
             hs, references = self.decoder(tgt, memory, memory_key_padding_mask=mask_flatten,
                             pos=lvl_pos_embed_flatten, refpoints_unsigmoid=refpoint_embed,
