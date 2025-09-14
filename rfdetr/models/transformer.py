@@ -195,8 +195,11 @@ class Transformer(nn.Module):
         valid_ratio_w = valid_W.float() / W
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
+    
+    def refpoints_refine(self, refpoints_unsigmoid, new_refpoints_delta):
+        return self.decoder.refpoints_refine(refpoints_unsigmoid, new_refpoints_delta)
 
-    def forward(self, srcs, masks, pos_embeds, refpoint_embed, query_feat):
+    def forward(self, srcs, masks, pos_embeds, query_feat):
         src_flatten = []
         mask_flatten = [] if masks is not None else None
         lvl_pos_embed_flatten = []
@@ -228,23 +231,18 @@ class Transformer(nn.Module):
             # group detr for first stage
             refpoint_embed_ts, memory_ts, boxes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
+            tgt = []
             for g_idx in range(group_detr):
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
     
                 enc_outputs_class_unselected_gidx = self.enc_out_class_embed[g_idx](output_memory_gidx)
-                if self.bbox_reparam:
-                    enc_outputs_coord_delta_gidx = self.enc_out_bbox_embed[g_idx](output_memory_gidx)
-                    enc_outputs_coord_cxcy_gidx = enc_outputs_coord_delta_gidx[...,
-                        :2] * output_proposals[..., 2:] + output_proposals[..., :2]
-                    enc_outputs_coord_wh_gidx = enc_outputs_coord_delta_gidx[..., 2:].exp() * output_proposals[..., 2:]
-                    enc_outputs_coord_unselected_gidx = torch.concat(
-                        [enc_outputs_coord_cxcy_gidx, enc_outputs_coord_wh_gidx], dim=-1)
-                else:
-                    enc_outputs_coord_unselected_gidx = self.enc_out_bbox_embed[g_idx](
-                        output_memory_gidx) + output_proposals # (bs, \sum{hw}, 4) unsigmoid
+                enc_outputs_coord_delta_gidx = self.enc_out_bbox_embed[g_idx](output_memory_gidx)
+                enc_outputs_coord_unselected_gidx = self.refpoints_refine(output_proposals, enc_outputs_coord_delta_gidx)
 
                 topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2])
-                topk_proposals_gidx = torch.topk(enc_outputs_class_unselected_gidx.max(-1)[0], topk, dim=1)[1] # bs, nq
+                
+                max_class, max_class_id = enc_outputs_class_unselected_gidx.max(-1)
+                topk_proposals_gidx = torch.topk(max_class, topk, dim=1)[1] # bs, nq
                 
                 refpoint_embed_gidx_undetach = torch.gather(
                     enc_outputs_coord_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
@@ -265,22 +263,14 @@ class Transformer(nn.Module):
             boxes_ts = torch.cat(boxes_ts, dim=1)#.transpose(0, 1)
         
         if self.dec_layers > 0:
-            tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
+            # tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
             refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1)
             if self.two_stage:
                 ts_len = refpoint_embed_ts.shape[-2]
                 refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :]
                 refpoint_embed_subset = refpoint_embed[..., ts_len:, :]
 
-                if self.bbox_reparam:
-                    refpoint_embed_cxcy = refpoint_embed_ts_subset[..., :2] * refpoint_embed_ts[..., 2:]
-                    refpoint_embed_cxcy = refpoint_embed_cxcy + refpoint_embed_ts[..., :2]
-                    refpoint_embed_wh = refpoint_embed_ts_subset[..., 2:].exp() * refpoint_embed_ts[..., 2:]
-                    refpoint_embed_ts_subset = torch.concat(
-                        [refpoint_embed_cxcy, refpoint_embed_wh], dim=-1
-                    )
-                else:
-                    refpoint_embed_ts_subset = refpoint_embed_ts_subset + refpoint_embed_ts
+                refpoint_embed_ts_subset = self.refpoints_refine(refpoint_embed_ts, refpoint_embed_ts_subset)
                 
                 refpoint_embed = torch.concat(
                     [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
@@ -389,7 +379,7 @@ class TransformerDecoder(nn.Module):
             # For the first decoder layer, we do not apply transformation over p_s
             pos_transformation = 1
 
-            query_pos = query_pos * pos_transformation
+            query_pos = query_pos * pos_transformation # unnecessary
             
             output = layer(output, memory, tgt_mask=tgt_mask,
                            memory_mask=memory_mask,
@@ -414,9 +404,9 @@ class TransformerDecoder(nn.Module):
 
         if self.norm is not None:
             output = self.norm(output)
-            if self.return_intermediate:
-                intermediate.pop()
-                intermediate.append(output)
+            if self.return_intermediate:    # unnessary
+                intermediate.pop()          #
+                intermediate.append(output) #
 
         if self.return_intermediate:
             if self._export:
