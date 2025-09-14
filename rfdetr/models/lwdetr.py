@@ -65,10 +65,10 @@ class LWDETR(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
 
-        query_dim=4
-        self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
-        self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
-        nn.init.constant_(self.refpoint_embed.weight.data, 0)
+        # query_dim=4
+        # self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
+        self.class_feat = nn.Embedding(num_classes, hidden_dim)
+        # nn.init.constant_(self.refpoint_embed.weight.data, 0)
 
         self.backbone = backbone
         self.aux_loss = aux_loss
@@ -117,6 +117,9 @@ class LWDETR(nn.Module):
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data.repeat(num_repeats)
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data[:num_classes]
 
+        self.class_feat.weight.data = self.class_feat.weight.data.repeat(num_repeats, 1)
+        self.class_feat.weight.data = self.class_feat.weight.data[:num_classes]
+
     def export(self):
         self._export = True
         self._forward_origin = self.forward
@@ -152,16 +155,16 @@ class LWDETR(nn.Module):
             masks.append(mask)
             assert mask is not None
 
-        if self.training:
-            refpoint_embed_weight = self.refpoint_embed.weight
-            query_feat_weight = self.query_feat.weight
-        else:
-            # only use one group in inference
-            refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
-            query_feat_weight = self.query_feat.weight[:self.num_queries]
+        # if self.training:
+        #     refpoint_embed_weight = self.refpoint_embed.weight
+        #     query_feat_weight = self.query_feat.weight
+        # else:
+        #     # only use one group in inference
+        #     refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
+        #     query_feat_weight = self.query_feat.weight[:self.num_queries]
 
         hs, ref_unsigmoid, logits_enc, ref_enc = self.transformer(
-            srcs, masks, poss, refpoint_embed_weight, query_feat_weight)
+            srcs, masks, poss, None, self.class_feat.weight)
  
         if hs is not None:
             if self.bbox_reparam:
@@ -191,11 +194,11 @@ class LWDETR(nn.Module):
     def forward_export(self, tensors):
         srcs, _, poss = self.backbone(tensors)
         # only use one group in inference
-        refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
-        query_feat_weight = self.query_feat.weight[:self.num_queries]
+        # refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
+        # query_feat_weight = self.query_feat.weight[:self.num_queries]
 
         hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
-            srcs, None, poss, refpoint_embed_weight, query_feat_weight)
+            srcs, None, poss, None, self.class_feat.weight)
 
         if hs is not None:
             if self.bbox_reparam:

@@ -231,6 +231,7 @@ class Transformer(nn.Module):
             # group detr for first stage
             refpoint_embed_ts, boxes_ts, classes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
+            tgt = []
             for g_idx in range(group_detr):
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
     
@@ -252,6 +253,11 @@ class Transformer(nn.Module):
                 enc_outputs_class_selected_gidx = torch.gather(
                     enc_outputs_class_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, enc_outputs_class_unselected_gidx.shape[-1]))
                 
+                # get selected class ids
+                topk_proposals_id_gidx = enc_outputs_class_selected_gidx.max(-1)[1] # (bs, nq)
+                bs, _ = topk_proposals_id_gidx.shape
+                tgt.append(torch.gather(query_feat.unsqueeze(0).repeat(bs, 1, 1), 1, topk_proposals_id_gidx.unsqueeze(-1).repeat(1, 1, query_feat.shape[-1])))
+                
                 refpoint_embed_ts.append(refpoint_embed_gidx)
                 classes_ts.append(enc_outputs_class_selected_gidx)
                 boxes_ts.append(refpoint_embed_gidx_undetach)
@@ -261,22 +267,24 @@ class Transformer(nn.Module):
             boxes_ts = torch.cat(boxes_ts, dim=1)
             
             classes_ts = torch.cat(classes_ts, dim=1)
+            
+            tgt = torch.cat(tgt, dim=1)
         
         if self.dec_layers > 0:
-            tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
-            refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1)
-            if self.two_stage:
-                ts_len = refpoint_embed_ts.shape[-2]
-                refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :]
-                refpoint_embed_subset = refpoint_embed[..., ts_len:, :]
+            # tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
+            # refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1)
+            # if self.two_stage:
+            #     ts_len = refpoint_embed_ts.shape[-2]
+            #     refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :]
+            #     refpoint_embed_subset = refpoint_embed[..., ts_len:, :]
 
-                refpoint_embed_ts_subset = self.refpoints_refine(refpoint_embed_ts, refpoint_embed_ts_subset)
+            #     refpoint_embed_ts_subset = self.refpoints_refine(refpoint_embed_ts, refpoint_embed_ts_subset)
                 
-                refpoint_embed = torch.concat(
-                    [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
+            #     refpoint_embed = torch.concat(
+            #         [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
 
             hs, references = self.decoder(tgt, memory, memory_key_padding_mask=mask_flatten,
-                            pos=lvl_pos_embed_flatten, refpoints_unsigmoid=refpoint_embed,
+                            pos=lvl_pos_embed_flatten, refpoints_unsigmoid=refpoint_embed_ts,
                             level_start_index=level_start_index, 
                             spatial_shapes=spatial_shapes,
                             valid_ratios=valid_ratios.to(memory.dtype) if valid_ratios is not None else valid_ratios)
