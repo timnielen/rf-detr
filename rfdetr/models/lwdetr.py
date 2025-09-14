@@ -160,9 +160,9 @@ class LWDETR(nn.Module):
             refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
             query_feat_weight = self.query_feat.weight[:self.num_queries]
 
-        hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
+        hs, ref_unsigmoid, logits_enc, ref_enc = self.transformer(
             srcs, masks, poss, refpoint_embed_weight, query_feat_weight)
-
+ 
         if hs is not None:
             if self.bbox_reparam:
                 outputs_coord_delta = self.bbox_embed(hs)
@@ -181,17 +181,10 @@ class LWDETR(nn.Module):
                 out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 
         if self.two_stage:
-            group_detr = self.group_detr if self.training else 1
-            hs_enc_list = hs_enc.chunk(group_detr, dim=1)
-            cls_enc = []
-            for g_idx in range(group_detr):
-                cls_enc_gidx = self.transformer.enc_out_class_embed[g_idx](hs_enc_list[g_idx])
-                cls_enc.append(cls_enc_gidx)
-            cls_enc = torch.cat(cls_enc, dim=1)
             if hs is not None:
-                out['enc_outputs'] = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
+                out['enc_outputs'] = {'pred_logits': logits_enc, 'pred_boxes': ref_enc}
             else:
-                out = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
+                out = {'pred_logits': logits_enc, 'pred_boxes': ref_enc}
         
         return out
 

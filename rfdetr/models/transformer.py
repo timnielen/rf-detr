@@ -229,7 +229,7 @@ class Transformer(nn.Module):
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam)
             # group detr for first stage
-            refpoint_embed_ts, memory_ts, boxes_ts = [], [], []
+            refpoint_embed_ts, boxes_ts, classes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
             for g_idx in range(group_detr):
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
@@ -240,26 +240,27 @@ class Transformer(nn.Module):
 
                 topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2])
                 
-                max_class, max_class_id = enc_outputs_class_unselected_gidx.max(-1)
-                topk_proposals_gidx = torch.topk(max_class, topk, dim=1)[1] # bs, nq
-                
+                proposals_gidx = enc_outputs_class_unselected_gidx.max(-1)[0] # bs, hw
+                topk_proposals_gidx = torch.topk(proposals_gidx, topk, dim=1)[1] # bs, nq
+
                 refpoint_embed_gidx_undetach = torch.gather(
                     enc_outputs_coord_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
                 # for decoder layer, detached as initial ones, (bs, nq, 4)
                 refpoint_embed_gidx = refpoint_embed_gidx_undetach.detach()
                 
-                # get memory tgt
-                tgt_undetach_gidx = torch.gather(
-                    output_memory_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, self.d_model))
+                # get ts classes
+                enc_outputs_class_selected_gidx = torch.gather(
+                    enc_outputs_class_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, enc_outputs_class_unselected_gidx.shape[-1]))
                 
                 refpoint_embed_ts.append(refpoint_embed_gidx)
-                memory_ts.append(tgt_undetach_gidx)
+                classes_ts.append(enc_outputs_class_selected_gidx)
                 boxes_ts.append(refpoint_embed_gidx_undetach)
             # concat on dim=1, the nq dimension, (bs, nq, d) --> (bs, nq, d)
             refpoint_embed_ts = torch.cat(refpoint_embed_ts, dim=1)
             # (bs, nq, d)
-            memory_ts = torch.cat(memory_ts, dim=1)#.transpose(0, 1)
-            boxes_ts = torch.cat(boxes_ts, dim=1)#.transpose(0, 1)
+            boxes_ts = torch.cat(boxes_ts, dim=1)
+            
+            classes_ts = torch.cat(classes_ts, dim=1)
         
         if self.dec_layers > 0:
             tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
@@ -273,6 +274,8 @@ class Transformer(nn.Module):
                 
                 refpoint_embed = torch.concat(
                     [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
+                
+                # memory = memory_ts
 
             hs, references = self.decoder(tgt, memory, memory_key_padding_mask=mask_flatten,
                             pos=lvl_pos_embed_flatten, refpoints_unsigmoid=refpoint_embed,
@@ -286,9 +289,9 @@ class Transformer(nn.Module):
         
         if self.two_stage:
             if self.bbox_reparam:
-                return hs, references, memory_ts, boxes_ts
+                return hs, references, classes_ts, boxes_ts
             else:
-                return hs, references, memory_ts, boxes_ts.sigmoid()
+                return hs, references, classes_ts, boxes_ts.sigmoid()
         return hs, references, None, None
 
 
