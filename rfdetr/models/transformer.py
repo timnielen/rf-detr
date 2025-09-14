@@ -199,7 +199,7 @@ class Transformer(nn.Module):
     def refpoints_refine(self, refpoints_unsigmoid, new_refpoints_delta):
         return self.decoder.refpoints_refine(refpoints_unsigmoid, new_refpoints_delta)
 
-    def forward(self, srcs, masks, pos_embeds, query_feat):
+    def forward(self, srcs, masks, pos_embeds, refpoint_embed, query_feat):
         src_flatten = []
         mask_flatten = [] if masks is not None else None
         lvl_pos_embed_flatten = []
@@ -231,7 +231,6 @@ class Transformer(nn.Module):
             # group detr for first stage
             refpoint_embed_ts, memory_ts, boxes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
-            tgt = []
             for g_idx in range(group_detr):
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
     
@@ -263,7 +262,7 @@ class Transformer(nn.Module):
             boxes_ts = torch.cat(boxes_ts, dim=1)#.transpose(0, 1)
         
         if self.dec_layers > 0:
-            # tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
+            tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
             refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1)
             if self.two_stage:
                 ts_len = refpoint_embed_ts.shape[-2]
