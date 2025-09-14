@@ -174,3 +174,7 @@ cython_debug/
 .pypirc
 
 .idea/
+download
+launch.json
+*.pth
+output*
