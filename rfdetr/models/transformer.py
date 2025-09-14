@@ -229,9 +229,9 @@ class Transformer(nn.Module):
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam)
             # group detr for first stage
-            refpoint_embed_ts, boxes_ts, classes_ts = [], [], []
+            refpoint_embed_ts, boxes_ts, classes_ts, tgt_ts = [], [], [], []
             group_detr = self.group_detr if self.training else 1
-            tgt = []
+            
             for g_idx in range(group_detr):
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
     
@@ -253,37 +253,24 @@ class Transformer(nn.Module):
                 enc_outputs_class_selected_gidx = torch.gather(
                     enc_outputs_class_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, enc_outputs_class_unselected_gidx.shape[-1]))
                 
-                # get selected class ids
-                topk_proposals_id_gidx = enc_outputs_class_selected_gidx.max(-1)[1] # (bs, nq)
-                bs, _ = topk_proposals_id_gidx.shape
-                tgt.append(torch.gather(query_feat.unsqueeze(0).repeat(bs, 1, 1), 1, topk_proposals_id_gidx.unsqueeze(-1).repeat(1, 1, query_feat.shape[-1])))
+                topk_output_memory_gidx_undetach = torch.gather(
+                    output_memory_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, self.d_model))
+                topk_output_memory_gidx = topk_output_memory_gidx_undetach.detach()
                 
                 refpoint_embed_ts.append(refpoint_embed_gidx)
                 classes_ts.append(enc_outputs_class_selected_gidx)
                 boxes_ts.append(refpoint_embed_gidx_undetach)
+                tgt_ts.append(topk_output_memory_gidx)
+                
             # concat on dim=1, the nq dimension, (bs, nq, d) --> (bs, nq, d)
             refpoint_embed_ts = torch.cat(refpoint_embed_ts, dim=1)
-            # (bs, nq, d)
             boxes_ts = torch.cat(boxes_ts, dim=1)
-            
             classes_ts = torch.cat(classes_ts, dim=1)
-            
-            tgt = torch.cat(tgt, dim=1)
+            tgt_ts = torch.cat(tgt_ts, dim=1)
         
         if self.dec_layers > 0:
-            # tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
-            # refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1)
-            # if self.two_stage:
-            #     ts_len = refpoint_embed_ts.shape[-2]
-            #     refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :]
-            #     refpoint_embed_subset = refpoint_embed[..., ts_len:, :]
 
-            #     refpoint_embed_ts_subset = self.refpoints_refine(refpoint_embed_ts, refpoint_embed_ts_subset)
-                
-            #     refpoint_embed = torch.concat(
-            #         [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
-
-            hs, references = self.decoder(tgt, memory, memory_key_padding_mask=mask_flatten,
+            hs, references = self.decoder(tgt_ts, memory, memory_key_padding_mask=mask_flatten,
                             pos=lvl_pos_embed_flatten, refpoints_unsigmoid=refpoint_embed_ts,
                             level_start_index=level_start_index, 
                             spatial_shapes=spatial_shapes,
@@ -399,12 +386,11 @@ class TransformerDecoder(nn.Module):
                            spatial_shapes=spatial_shapes,
                            level_start_index=level_start_index)
 
-            if not self.lite_refpoint_refine:
+            if not self.lite_refpoint_refine and layer_id != self.num_layers - 1:
                 # box iterative update
                 new_refpoints_delta = self.bbox_embed(output)
                 new_refpoints_unsigmoid = self.refpoints_refine(refpoints_unsigmoid, new_refpoints_delta)
-                if layer_id != self.num_layers - 1:
-                    hs_refpoints_unsigmoid.append(new_refpoints_unsigmoid)
+                hs_refpoints_unsigmoid.append(new_refpoints_unsigmoid)
                 refpoints_unsigmoid = new_refpoints_unsigmoid.detach()
 
             if self.return_intermediate:

@@ -127,6 +127,9 @@ class LWDETR(nn.Module):
         for name, m in self.named_modules():
             if hasattr(m, "export") and isinstance(m.export, Callable) and hasattr(m, "_export") and not m._export:
                 m.export()
+                
+    def refpoints_refine(self, refpoints_unsigmoid, new_refpoints_delta):
+        return self.transformer.refpoints_refine(refpoints_unsigmoid, new_refpoints_delta)
 
     def forward(self, samples: NestedTensor, targets=None):
         """ The forward expects a NestedTensor, which consists of:
@@ -155,27 +158,14 @@ class LWDETR(nn.Module):
             masks.append(mask)
             assert mask is not None
 
-        # if self.training:
-        #     refpoint_embed_weight = self.refpoint_embed.weight
-        #     query_feat_weight = self.query_feat.weight
-        # else:
-        #     # only use one group in inference
-        #     refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
-        #     query_feat_weight = self.query_feat.weight[:self.num_queries]
-
         hs, ref_unsigmoid, logits_enc, ref_enc = self.transformer(
-            srcs, masks, poss, None, self.class_feat.weight)
+            srcs, masks, poss, None, None)
  
         if hs is not None:
-            if self.bbox_reparam:
-                outputs_coord_delta = self.bbox_embed(hs)
-                outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
-                outputs_coord_wh = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
-                outputs_coord = torch.concat(
-                    [outputs_coord_cxcy, outputs_coord_wh], dim=-1
-                )
-            else:
-                outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
+            outputs_coord_delta = self.bbox_embed(hs)
+            outputs_coord = self.refpoints_refine(ref_unsigmoid, outputs_coord_delta)
+            if not self.bbox_reparam:
+                outputs_coord = outputs_coord.sigmoid()
 
             outputs_class = self.class_embed(hs)
 
