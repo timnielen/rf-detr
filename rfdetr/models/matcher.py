@@ -67,7 +67,9 @@ class HungarianMatcher(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
-        bs, num_queries = outputs["pred_logits"].shape[:2]
+        bs, num_queries, box_dim = outputs["pred_boxes"].shape
+        num_boxes_per_query = box_dim // 4
+        assert box_dim % 4 == 0, f"box dimension should be divisible by 4, but got {box_dim}"
 
         # We flatten to compute the cost matrices in a batch
         out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()  # [batch_size * num_queries, num_classes]
@@ -77,8 +79,14 @@ class HungarianMatcher(nn.Module):
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
-        # Compute the giou cost betwen boxes
-        giou = generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        # Compute the giou cost betwen boxes -> # [batch_size * num_queries * num_boxes_per_query, num_target_boxes * num_boxes_per_query]
+        giou = generalized_box_iou(box_cxcywh_to_xyxy(out_bbox.reshape(-1, 4)), box_cxcywh_to_xyxy(tgt_bbox.reshape(-1, 4))) 
+        
+        # aggregate giou for multiple boxes per query
+        giou = giou.reshape(out_bbox.shape[0], num_boxes_per_query, tgt_bbox.shape[0], num_boxes_per_query)
+        giou = giou.permute(0, 2, 1, 3).diagonal(dim1=2, dim2=3)  # [out_bbox.shape[0], tgt_bbox.shape[0], num_boxes_per_query]
+        giou = giou.mean(-1)  # [out_bbox.shape[0], tgt_bbox.shape[0]]
+        
         cost_giou = -giou
 
         # Compute the classification cost.

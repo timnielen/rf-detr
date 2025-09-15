@@ -136,7 +136,8 @@ class Transformer(nn.Module):
                  num_feature_levels=4, dec_n_points=4,
                  lite_refpoint_refine=False,
                  decoder_norm_type='LN',
-                 bbox_reparam=False):
+                 bbox_reparam=False,
+                 num_boxes_per_query=1):
         super().__init__()
         self.encoder = None
 
@@ -157,7 +158,8 @@ class Transformer(nn.Module):
                                           return_intermediate=return_intermediate_dec,
                                           d_model=d_model,
                                           lite_refpoint_refine=lite_refpoint_refine,
-                                          bbox_reparam=bbox_reparam)
+                                          bbox_reparam=bbox_reparam,
+                                          num_boxes_per_query=num_boxes_per_query)
         
         
         self.two_stage = two_stage
@@ -173,7 +175,7 @@ class Transformer(nn.Module):
         self.group_detr = group_detr
         self.num_feature_levels = num_feature_levels
         self.bbox_reparam = bbox_reparam
-
+        self.num_boxes_per_query = num_boxes_per_query
         self._export = False
     
     def export(self):
@@ -228,6 +230,8 @@ class Transformer(nn.Module):
         if self.two_stage:
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam)
+            
+            output_proposals = output_proposals.repeat(1, 1, self.num_boxes_per_query)
             # group detr for first stage
             refpoint_embed_ts, boxes_ts, classes_ts, tgt_ts = [], [], [], []
             group_detr = self.group_detr if self.training else 1
@@ -245,7 +249,7 @@ class Transformer(nn.Module):
                 topk_proposals_gidx = torch.topk(proposals_gidx, topk, dim=1)[1] # bs, nq
 
                 refpoint_embed_gidx_undetach = torch.gather(
-                    enc_outputs_coord_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
+                    enc_outputs_coord_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, enc_outputs_coord_unselected_gidx.shape[-1])) # unsigmoid
                 # for decoder layer, detached as initial ones, (bs, nq, 4)
                 refpoint_embed_gidx = refpoint_embed_gidx_undetach.detach()
                 
@@ -297,7 +301,8 @@ class TransformerDecoder(nn.Module):
                  return_intermediate=False,
                  d_model=256,
                  lite_refpoint_refine=False,
-                 bbox_reparam=False):
+                 bbox_reparam=False,
+                 num_boxes_per_query=1):
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
@@ -306,8 +311,9 @@ class TransformerDecoder(nn.Module):
         self.return_intermediate = return_intermediate
         self.lite_refpoint_refine = lite_refpoint_refine
         self.bbox_reparam = bbox_reparam
-
-        self.ref_point_head = MLP(2 * d_model, d_model, d_model, 2)
+        self.num_boxes_per_query = num_boxes_per_query
+        
+        self.ref_point_head = MLP(2 * d_model * num_boxes_per_query, d_model, d_model, 2)
 
         self._export = False
     
@@ -316,11 +322,14 @@ class TransformerDecoder(nn.Module):
 
     def refpoints_refine(self, refpoints_unsigmoid, new_refpoints_delta):
         if self.bbox_reparam:
+            shape = refpoints_unsigmoid.shape
+            refpoints_unsigmoid = refpoints_unsigmoid.reshape(-1, 4)
+            new_refpoints_delta = new_refpoints_delta.reshape(-1, 4)
             new_refpoints_cxcy = new_refpoints_delta[..., :2] * refpoints_unsigmoid[..., 2:] + refpoints_unsigmoid[..., :2]
             new_refpoints_wh = new_refpoints_delta[..., 2:].exp() * refpoints_unsigmoid[..., 2:]
             new_refpoints_unsigmoid = torch.concat(
                 [new_refpoints_cxcy, new_refpoints_wh], dim=-1
-            )
+            ).reshape(*shape)
         else:
             new_refpoints_unsigmoid = refpoints_unsigmoid + new_refpoints_delta
         return new_refpoints_unsigmoid
@@ -342,17 +351,20 @@ class TransformerDecoder(nn.Module):
         hs_refpoints_unsigmoid = [refpoints_unsigmoid]
         
         def get_reference(refpoints):
-            # [num_queries, batch_size, 4]
-            obj_center = refpoints[..., :4]
+            bs, nq, _ = refpoints.shape
+            obj_center = refpoints.reshape(bs, nq*self.num_boxes_per_query, 4)
             
             if self._export:
-                query_sine_embed = gen_sineembed_for_position(obj_center, self.d_model / 2) # bs, nq, 256*2 
-                refpoints_input = obj_center[:, :, None] # bs, nq, 1, 4
+                query_sine_embed = gen_sineembed_for_position(obj_center, self.d_model / 2) # bs, nq*nb, 256*2 
+                refpoints_input = obj_center[:, :, None] # bs, nq*nb, 1, 4
             else:
                 refpoints_input = obj_center[:, :, None] \
-                                        * torch.cat([valid_ratios, valid_ratios], -1)[:, None] # bs, nq, nlevel, 4
+                                        * torch.cat([valid_ratios, valid_ratios], -1)[:, None] # bs, nq*nb, nlevel, 4
                 query_sine_embed = gen_sineembed_for_position(
-                    refpoints_input[:, :, 0, :], self.d_model / 2) # bs, nq, 256*2 
+                    refpoints_input[:, :, 0, :], self.d_model / 2) # bs, nq*nb, 256*2 
+            
+            query_sine_embed = query_sine_embed.reshape(bs, nq, -1)
+            refpoints_input = refpoints_input.reshape(bs, nq, self.num_boxes_per_query, -1, 4).mean(2) # bs, nq, nlevel, 4
             query_pos = self.ref_point_head(query_sine_embed)
             return obj_center, refpoints_input, query_pos, query_sine_embed
         
@@ -561,6 +573,7 @@ def build_transformer(args):
         lite_refpoint_refine=args.lite_refpoint_refine,
         decoder_norm_type=args.decoder_norm,
         bbox_reparam=args.bbox_reparam,
+        num_boxes_per_query=args.num_boxes_per_query,
     )
 
 

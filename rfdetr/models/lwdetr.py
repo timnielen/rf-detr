@@ -46,7 +46,8 @@ class LWDETR(nn.Module):
                  group_detr=1,
                  two_stage=False,
                  lite_refpoint_refine=False,
-                 bbox_reparam=False):
+                 bbox_reparam=False,
+                 num_boxes_per_query=1):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -61,13 +62,14 @@ class LWDETR(nn.Module):
         super().__init__()
         self.num_queries = num_queries
         self.transformer = transformer
+        self.num_boxes_per_query = num_boxes_per_query
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
-        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4*num_boxes_per_query, 3)
 
         # query_dim=4
         # self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
-        self.class_feat = nn.Embedding(num_classes, hidden_dim)
+        # self.class_feat = nn.Embedding(num_classes, hidden_dim)
         # nn.init.constant_(self.refpoint_embed.weight.data, 0)
 
         self.backbone = backbone
@@ -117,8 +119,8 @@ class LWDETR(nn.Module):
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data.repeat(num_repeats)
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data[:num_classes]
 
-        self.class_feat.weight.data = self.class_feat.weight.data.repeat(num_repeats, 1)
-        self.class_feat.weight.data = self.class_feat.weight.data[:num_classes]
+        # self.class_feat.weight.data = self.class_feat.weight.data.repeat(num_repeats, 1)
+        # self.class_feat.weight.data = self.class_feat.weight.data[:num_classes]
 
     def export(self):
         self._export = True
@@ -187,23 +189,18 @@ class LWDETR(nn.Module):
         # refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
         # query_feat_weight = self.query_feat.weight[:self.num_queries]
 
-        hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
-            srcs, None, poss, None, self.class_feat.weight)
+        hs, ref_unsigmoid, logits_enc, ref_enc = self.transformer(
+            srcs, None, poss, None, None)
 
         if hs is not None:
-            if self.bbox_reparam:
-                outputs_coord_delta = self.bbox_embed(hs)
-                outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
-                outputs_coord_wh = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
-                outputs_coord = torch.concat(
-                    [outputs_coord_cxcy, outputs_coord_wh], dim=-1
-                )
-            else:
-                outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
+            outputs_coord_delta = self.bbox_embed(hs)
+            outputs_coord = self.refpoints_refine(ref_unsigmoid, outputs_coord_delta)
+            if not self.bbox_reparam:
+                outputs_coord = outputs_coord.sigmoid()
             outputs_class = self.class_embed(hs)
         else:
             assert self.two_stage, "if not using decoder, two_stage must be True"
-            outputs_class = self.transformer.enc_out_class_embed[0](hs_enc)
+            outputs_class = logits_enc
             outputs_coord = ref_enc
             
         return outputs_coord, outputs_class
@@ -270,6 +267,30 @@ class SetCriterion(nn.Module):
         self.use_varifocal_loss = use_varifocal_loss
         self.use_position_supervised_loss = use_position_supervised_loss
         self.ia_bce_loss = ia_bce_loss
+        
+    def multi_box_iou(self, boxes1, boxes2):
+        n1, box_dim = boxes1.shape
+        n2, box_dim = boxes2.shape
+        num_boxes_per_query = box_dim // 4
+        in_boxes1 = box_ops.box_cxcywh_to_xyxy(boxes1.reshape(-1, 4))
+        in_boxes2 = box_ops.box_cxcywh_to_xyxy(boxes2.reshape(-1, 4))
+        iou, _ = box_ops.box_iou(in_boxes1, in_boxes2)
+        iou = iou.reshape(n1, num_boxes_per_query, n2, num_boxes_per_query)
+        iou = iou.permute(0, 2, 1, 3).diagonal(dim1=2, dim2=3)  # [n1, n2, num_boxes_per_query]
+        iou = iou.mean(-1)  # [n1, n2]
+        return iou
+    
+    def multi_box_giou(self, boxes1, boxes2):
+        n1, box_dim = boxes1.shape
+        n2, box_dim = boxes2.shape
+        num_boxes_per_query = box_dim // 4
+        in_boxes1 = box_ops.box_cxcywh_to_xyxy(boxes1.reshape(-1, 4))
+        in_boxes2 = box_ops.box_cxcywh_to_xyxy(boxes2.reshape(-1, 4))
+        iou = box_ops.generalized_box_iou(in_boxes1, in_boxes2)
+        iou = iou.reshape(n1, num_boxes_per_query, n2, num_boxes_per_query)
+        iou = iou.permute(0, 2, 1, 3).diagonal(dim1=2, dim2=3)  # [n1, n2, num_boxes_per_query]
+        iou = iou.mean(-1)  # [n1, n2]
+        return iou
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
@@ -287,9 +308,7 @@ class SetCriterion(nn.Module):
             src_boxes = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-            iou_targets=torch.diag(box_ops.box_iou(
-                box_ops.box_cxcywh_to_xyxy(src_boxes.detach()),
-                box_ops.box_cxcywh_to_xyxy(target_boxes))[0])
+            iou_targets=torch.diag(self.multi_box_iou(src_boxes.detach(), target_boxes))
             pos_ious = iou_targets.clone().detach()
             prob = src_logits.sigmoid()
             #init positive weights and negative weights
@@ -313,9 +332,7 @@ class SetCriterion(nn.Module):
             src_boxes = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-            iou_targets=torch.diag(box_ops.box_iou(
-                box_ops.box_cxcywh_to_xyxy(src_boxes.detach()),
-                box_ops.box_cxcywh_to_xyxy(target_boxes))[0])
+            iou_targets=torch.diag(self.multi_box_iou(src_boxes.detach(), target_boxes))
             pos_ious = iou_targets.clone().detach()
             # pos_ious_func = pos_ious ** 2
             pos_ious_func = pos_ious
@@ -334,9 +351,7 @@ class SetCriterion(nn.Module):
             src_boxes = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-            iou_targets=torch.diag(box_ops.box_iou(
-                box_ops.box_cxcywh_to_xyxy(src_boxes.detach()),
-                box_ops.box_cxcywh_to_xyxy(target_boxes))[0])
+            iou_targets=torch.diag(self.multi_box_iou(src_boxes.detach(), target_boxes))
             pos_ious = iou_targets.clone().detach()
 
             cls_iou_targets = torch.zeros((src_logits.shape[0], src_logits.shape[1],self.num_classes),
@@ -393,9 +408,7 @@ class SetCriterion(nn.Module):
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
-        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
-            box_ops.box_cxcywh_to_xyxy(src_boxes),
-            box_ops.box_cxcywh_to_xyxy(target_boxes)))
+        loss_giou = 1 - torch.diag(self.multi_box_giou(src_boxes, target_boxes))
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
@@ -551,12 +564,13 @@ class PostProcess(nn.Module):
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
-        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
+
+        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox.reshape(-1, 4)).reshape(*out_bbox.shape)
+        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,boxes.shape[-1]))
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
+        scale_fct = torch.stack([img_w, img_h], dim=1).repeat(1, boxes.shape[-1] // 2)
         boxes = boxes * scale_fct[:, None, :]
 
         results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
@@ -634,6 +648,7 @@ def build_model(args):
         two_stage=args.two_stage,
         lite_refpoint_refine=args.lite_refpoint_refine,
         bbox_reparam=args.bbox_reparam,
+        num_boxes_per_query=args.num_boxes_per_query,
     )
     return model
 

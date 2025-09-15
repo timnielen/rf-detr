@@ -33,6 +33,8 @@ class ModelConfig(BaseModel):
     group_detr: int = 13
     gradient_checkpointing: bool = False
     positional_encoding_size: int
+    pretrain_exclude_keys: Optional[List[str]] = None
+    num_boxes_per_query: int = 1
 
 class RFDETRBaseConfig(ModelConfig):
     """

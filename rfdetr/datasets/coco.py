@@ -49,7 +49,15 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
         if self._transforms is not None:
+            #in case of multiple boxes per query put flatten into first dimension
+            nb, d_box = target["boxes"].shape
+            target["boxes"] = target["boxes"].reshape(-1, 4)
+            
+            # Apply transforms
             img, target = self._transforms(img, target)
+            
+            # revert to original shape
+            target["boxes"] = target["boxes"].reshape(-1, d_box)
         return img, target
 
 
@@ -67,15 +75,23 @@ class ConvertCoco(object):
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        boxes = torch.as_tensor(boxes, dtype=torch.float32)
+        nb, d_box = boxes.shape
+        num_boxes_per_annotation = d_box // 4
+        assert d_box % 4 == 0, "The dimension of bbox should be multiple of 4."
+        boxes = boxes.reshape(nb * num_boxes_per_annotation, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
+        
+        boxes = boxes.reshape(nb, num_boxes_per_annotation*4)
 
         classes = [obj["category_id"] for obj in anno]
         classes = torch.tensor(classes, dtype=torch.int64)
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
+        for box in range(1,num_boxes_per_annotation):
+            keep &= (boxes[:, (3+4*box)] > boxes[:, (1+4*box)]) & (boxes[:, (2+4*box)] > boxes[:, (0+4*box)])
         boxes = boxes[keep]
         classes = classes[keep]
 
@@ -114,15 +130,16 @@ def make_coco_transforms(image_set, resolution, multi_scale=False, expanded_scal
     if image_set == 'train':
         return T.Compose([
             # T.RandomHorizontalFlip(),
+            T.RandomPhotometricDistort(),
             T.RandomRotate(),
-            T.RandomSelect(
-                T.RandomResize(scales, max_size=1333),
-                T.Compose([
-                    T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
-                    T.RandomResize(scales, max_size=1333),
-                ])
-            ),
+            # T.RandomSelect(
+            T.RandomResize(scales, max_size=1333),
+                # T.Compose([
+                #     T.RandomResize([400, 500, 600]),
+                #     T.RandomSizeCrop(384, 600),
+                #     T.RandomResize(scales, max_size=1333),
+                # ])
+            # ),
             normalize,
         ])
 
@@ -161,15 +178,16 @@ def make_coco_transforms_square_div_64(image_set, resolution, multi_scale=False,
     if image_set == 'train':
         return T.Compose([
             # T.RandomHorizontalFlip(),
+            T.RandomPhotometricDistort(),
             T.RandomRotate(),
-            T.RandomSelect(
-                T.SquareResize(scales),
-                T.Compose([
-                    T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
-                    T.SquareResize(scales),
-                ]),
-            ),
+            # T.RandomSelect(
+            T.SquareResize(scales),
+            #     T.Compose([
+            #         T.RandomResize([400, 500, 600]),
+            #         T.RandomSizeCrop(384, 600),
+            #         T.SquareResize(scales),
+            #     ]),
+            # ),
             normalize,
         ])
 

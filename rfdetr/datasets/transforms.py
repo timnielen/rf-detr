@@ -489,6 +489,18 @@ class Normalize(object):
             boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
             target["boxes"] = boxes
         return image, target
+    
+class RandomPhotometricDistort(object):
+    def __init__(self, brightness=(0.875, 1.125), contrast=(0.5, 1.5), saturation=(0.5, 1.5), hue=(-0.05, 0.05)):
+        self.pd = T.v2.RandomPhotometricDistort(
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue
+        )
+
+    def __call__(self, img, target):
+        return self.pd(img), target
 
 
 class Compose(object):

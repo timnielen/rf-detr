@@ -331,9 +331,9 @@ class RFDETR:
             boxes = result["boxes"]
 
             keep = scores > threshold
-            scores = scores[keep]
-            labels = labels[keep]
-            boxes = boxes[keep]
+            scores = scores[keep].repeat_interleave(self.model_config.num_boxes_per_query, dim=0)
+            labels = labels[keep].repeat_interleave(self.model_config.num_boxes_per_query, dim=0)
+            boxes = boxes[keep].reshape(-1, 4) # handle multiple boxes per query
 
             detections = sv.Detections(
                 xyxy=boxes.float().cpu().numpy(),

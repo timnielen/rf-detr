@@ -97,7 +97,7 @@ class CocoEvaluator(object):
                 continue
 
             boxes = prediction["boxes"]
-            boxes = convert_to_xywh(boxes).tolist()
+            boxes = convert_to_xywh(boxes.reshape(-1, 4)).reshape(*boxes.shape).tolist()
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
 
