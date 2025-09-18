@@ -322,14 +322,17 @@ class TransformerDecoder(nn.Module):
 
     def refpoints_refine(self, refpoints_unsigmoid, new_refpoints_delta):
         if self.bbox_reparam:
-            shape = refpoints_unsigmoid.shape
-            refpoints_unsigmoid = refpoints_unsigmoid.reshape(-1, 4)
-            new_refpoints_delta = new_refpoints_delta.reshape(-1, 4)
+            shape1 = refpoints_unsigmoid.shape
+            shape2 = new_refpoints_delta.shape
+            refpoints_unsigmoid = refpoints_unsigmoid.reshape(*shape1[:-2], -1, 4)
+            new_refpoints_delta = new_refpoints_delta.reshape(*shape2[:-2], -1, 4)
             new_refpoints_cxcy = new_refpoints_delta[..., :2] * refpoints_unsigmoid[..., 2:] + refpoints_unsigmoid[..., :2]
             new_refpoints_wh = new_refpoints_delta[..., 2:].exp() * refpoints_unsigmoid[..., 2:]
             new_refpoints_unsigmoid = torch.concat(
                 [new_refpoints_cxcy, new_refpoints_wh], dim=-1
-            ).reshape(*shape)
+            )
+            combined_shape = new_refpoints_unsigmoid.shape
+            new_refpoints_unsigmoid = new_refpoints_unsigmoid.reshape(*combined_shape[:-2], -1, shape1[-1])
         else:
             new_refpoints_unsigmoid = refpoints_unsigmoid + new_refpoints_delta
         return new_refpoints_unsigmoid

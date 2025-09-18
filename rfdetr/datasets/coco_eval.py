@@ -217,6 +217,43 @@ def create_common_coco_eval(coco_eval, img_ids, eval_imgs):
 # From pycocotools, just removed the prints and fixed
 # a Python3 bug about unicode not defined
 #################################################################
+def COCOeval_computeIoU(self, imgId, catId):
+    p = self.params
+    if p.useCats:
+        gt = self._gts[imgId,catId]
+        dt = self._dts[imgId,catId]
+    else:
+        gt = [_ for cId in p.catIds for _ in self._gts[imgId,cId]]
+        dt = [_ for cId in p.catIds for _ in self._dts[imgId,cId]]
+    if len(gt) == 0 and len(dt) ==0:
+        return []
+    inds = np.argsort([-d['score'] for d in dt], kind='mergesort')
+    dt = [dt[i] for i in inds]
+    if len(dt) > p.maxDets[-1]:
+        dt=dt[0:p.maxDets[-1]]
+
+    if p.iouType == 'segm':
+        g = [g['segmentation'] for g in gt]
+        d = [d['segmentation'] for d in dt]
+    elif p.iouType == 'bbox':
+        g = [g['bbox'] for g in gt]
+        d = [d['bbox'] for d in dt]
+    else:
+        raise Exception('unknown iouType for iou computation')
+
+    # compute iou between each dt and gt region
+    iscrowd = [int(o['iscrowd']) for o in gt]
+    
+    # nq, num_boxes_per_query = len(d), len(d[0]) // 4 if len(d) > 0 else 0
+    # d = np.array(d).reshape(-1,4)
+    # g = np.array(g).reshape(-1,4)
+    # is_crowd = np.array(iscrowd).repeat(num_boxes_per_query, axis=0)
+    d = np.array(d)[..., :4]
+    g = np.array(g)[..., :4]
+    ious = mask_util.iou(d,g,iscrowd)
+    # ious = np.array(ious).reshape(nq, num_boxes_per_query, -1, num_boxes_per_query)
+    # ious = ious.transpose(0,2,1,3).diagonal(axis1=2, axis2=3).mean(axis=-1)
+    return ious
 
 
 def evaluate(self):
@@ -243,7 +280,7 @@ def evaluate(self):
     catIds = p.catIds if p.useCats else [-1]
 
     if p.iouType == 'segm' or p.iouType == 'bbox':
-        computeIoU = self.computeIoU
+        computeIoU = lambda imgId, catId: COCOeval_computeIoU(self, imgId, catId)
     elif p.iouType == 'keypoints':
         computeIoU = self.computeOks
     self.ious = {
@@ -269,3 +306,4 @@ def evaluate(self):
 #################################################################
 # end of straight copy from pycocotools, just removing the prints
 #################################################################
+

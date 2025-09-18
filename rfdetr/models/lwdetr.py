@@ -75,14 +75,6 @@ class LWDETR(nn.Module):
         self.backbone = backbone
         self.aux_loss = aux_loss
         self.group_detr = group_detr
-
-        # iter update
-        self.lite_refpoint_refine = lite_refpoint_refine
-        if not self.lite_refpoint_refine:
-            self.transformer.decoder.bbox_embed = self.bbox_embed
-        else:
-            self.transformer.decoder.bbox_embed = None
-
         self.bbox_reparam = bbox_reparam
 
         # init prior_prob setting for focal loss
@@ -90,9 +82,20 @@ class LWDETR(nn.Module):
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
 
-        # init bbox_mebed
+        # init bbox_embed
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
+        # if num_boxes_per_query > 1:
+        #     self.bbox_embed_stacked = StackedMLP([copy.deepcopy(self.bbox_embed) for _ in range(num_boxes_per_query)])
+        # else:
+        #     self.bbox_embed_stacked = self.bbox_embed
+        
+        # iter update
+        self.lite_refpoint_refine = lite_refpoint_refine
+        if not self.lite_refpoint_refine:
+            self.transformer.decoder.bbox_embed = self.bbox_embed
+        else:
+            self.transformer.decoder.bbox_embed = None
 
         # two_stage
         self.two_stage = two_stage
@@ -277,7 +280,7 @@ class SetCriterion(nn.Module):
         iou, _ = box_ops.box_iou(in_boxes1, in_boxes2)
         iou = iou.reshape(n1, num_boxes_per_query, n2, num_boxes_per_query)
         iou = iou.permute(0, 2, 1, 3).diagonal(dim1=2, dim2=3)  # [n1, n2, num_boxes_per_query]
-        iou = iou.mean(-1)  # [n1, n2]
+        iou = 0.75 * iou[..., 0] + 0.25 * iou[..., 1]  # [n1, n2]
         return iou
     
     def multi_box_giou(self, boxes1, boxes2):
@@ -289,7 +292,7 @@ class SetCriterion(nn.Module):
         iou = box_ops.generalized_box_iou(in_boxes1, in_boxes2)
         iou = iou.reshape(n1, num_boxes_per_query, n2, num_boxes_per_query)
         iou = iou.permute(0, 2, 1, 3).diagonal(dim1=2, dim2=3)  # [n1, n2, num_boxes_per_query]
-        iou = iou.mean(-1)  # [n1, n2]
+        iou = 0.75 * iou[..., 0] + 0.25 * iou[..., 1]  # [n1, n2]
         return iou
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
@@ -591,6 +594,18 @@ class MLP(nn.Module):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
+    
+class StackedMLP(nn.Module):
+    def __init__(self, mlps):
+        super().__init__()
+        self.num_stacks = len(mlps)
+        self.mlps = nn.ModuleList(mlps)
+        
+    def forward(self, x):
+        outs = []
+        for i in range(self.num_stacks):
+            outs.append(self.mlps[i](x))
+        return torch.cat(outs, dim=-1)  # (batch_size, num_queries, output_dim*num_stacks)
 
 
 def build_model(args):

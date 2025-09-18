@@ -85,8 +85,8 @@ class HungarianMatcher(nn.Module):
         # aggregate giou for multiple boxes per query
         giou = giou.reshape(out_bbox.shape[0], num_boxes_per_query, tgt_bbox.shape[0], num_boxes_per_query)
         giou = giou.permute(0, 2, 1, 3).diagonal(dim1=2, dim2=3)  # [out_bbox.shape[0], tgt_bbox.shape[0], num_boxes_per_query]
-        giou = giou.mean(-1)  # [out_bbox.shape[0], tgt_bbox.shape[0]]
-        
+        #giou = giou.mean(-1)  # [out_bbox.shape[0], tgt_bbox.shape[0]]
+        giou = 0.75 * giou[..., 0] + 0.25 * giou[..., 1]
         cost_giou = -giou
 
         # Compute the classification cost.
