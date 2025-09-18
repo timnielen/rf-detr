@@ -68,6 +68,9 @@ onnxexport = [
     "onnx_graphsurgeon",
     "onnxruntime"
 ]
+coremlexport = [
+    "coremltools",
+]
 metrics = [
     "tensorboard>=2.13.0",
     "wandb"
